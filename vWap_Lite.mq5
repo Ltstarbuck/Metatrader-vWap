@@ -5,11 +5,11 @@
 //+------------------------------------------------------------------+
 #property copyright         "Copyright 2016, SOL Digital Consultoria LTDA"
 #property link              "http://www.soldigitalconsultoria.com.br"
-#property version           "1.49"
+#property version           "1.5"
 
 #property indicator_chart_window
-#property indicator_buffers 3
-#property indicator_plots   3
+#property indicator_buffers 4
+#property indicator_plots   4
 
 #property indicator_label1  "VWAP Daily"
 #property indicator_type1   DRAW_LINE
@@ -29,10 +29,17 @@
 #property indicator_style3  STYLE_DASH
 #property indicator_width3  2
 
+#property indicator_label4  "VWAP Yearly"
+#property indicator_type4   DRAW_LINE
+#property indicator_color4  clrMagenta
+#property indicator_style4  STYLE_DASH
+#property indicator_width4  2
+
 enum DATE_TYPE {
     DAILY,
     WEEKLY,
-    MONTHLY
+    MONTHLY,
+    YEARLY
 };
 
 enum PRICE_TYPE {
@@ -68,6 +75,12 @@ datetime CreateDateTime(DATE_TYPE nReturnType = DAILY, datetime dtDay = D'2000.0
         dtReturnDate = (StructToTime(timeStruct));
     }
 
+    if(nReturnType == YEARLY) {
+        timeStruct.mon = 1;
+        timeStruct.day = 1;
+        dtReturnDate = (StructToTime(timeStruct));
+    }
+
     return dtReturnDate;
 }
 
@@ -80,17 +93,66 @@ input   bool        Enable_Weekly       = false;
 input   bool        Show_Weekly_Value   = false;
 input   bool        Enable_Monthly      = false;
 input   bool        Show_Monthly_Value  = false;
+input   bool        Enable_Yearly       = false;
+input   bool        Show_Yearly_Value   = false;
+input   bool        Show_Countdown      = true;        // Show candlestick closing countdown
+input   bool        Enable_Alert       = true;       // Enable VWAP crossover alert
+input   bool        Alert_On_Daily     = true;        // Daily VWAP alert
+input   bool        Alert_On_Weekly    = false;       // Weekly VWAP alert
+input   bool        Alert_On_Monthly   = false;       // Monthly VWAP alert
+input   bool        Alert_On_Yearly    = false;       // Yearly VWAP alert
 
-double          VWAP_Buffer_Daily[], VWAP_Buffer_Weekly[], VWAP_Buffer_Monthly[];
+double          VWAP_Buffer_Daily[], VWAP_Buffer_Weekly[], VWAP_Buffer_Monthly[], VWAP_Buffer_Yearly[];
 double          nPriceArr[], nTotalTPV[], nTotalVol[];
-double          nSumDailyTPV = 0, nSumWeeklyTPV = 0, nSumMonthlyTPV = 0;
-double          nSumDailyVol = 0, nSumWeeklyVol = 0, nSumMonthlyVol = 0;
-int             nIdxDaily = 0, nIdxWeekly = 0, nIdxMonthly = 0, nIdx = 0;
+double          nSumDailyTPV = 0, nSumWeeklyTPV = 0, nSumMonthlyTPV = 0, nSumYearlyTPV = 0;
+double          nSumDailyVol = 0, nSumWeeklyVol = 0, nSumMonthlyVol = 0, nSumYearlyVol = 0;
+int             nIdxDaily = 0, nIdxWeekly = 0, nIdxMonthly = 0, nIdxYearly = 0, nIdx = 0;
 bool            bIsFirstRun = true;
-string          sDailyStr = "", sWeeklyStr  = "", sMonthlyStr = "";
-datetime        dtLastDay = CreateDateTime(DAILY), dtLastWeek = CreateDateTime(WEEKLY), dtLastMonth = CreateDateTime(MONTHLY);
+string          sDailyStr = "", sWeeklyStr  = "", sMonthlyStr = "", sYearlyStr = "";
+datetime        dtLastDay = CreateDateTime(DAILY), dtLastWeek = CreateDateTime(WEEKLY), dtLastMonth = CreateDateTime(MONTHLY), dtLastYear = CreateDateTime(YEARLY);
 ENUM_TIMEFRAMES LastTimePeriod = PERIOD_MN1;
 int             nStringYDistance = 40;
+string          sCountdownStr = "";
+
+// Alert status variables
+bool            bAlertDaily = false;
+bool            bAlertWeekly = false;
+bool            bAlertMonthly = false;
+bool            bAlertYearly = false;
+datetime        dtLastAlertTime = 0;  // Last alert time
+
+// VWAP crossover alert detection function
+void CheckVWAPAlert(int currentBar, double &vwapBuffer[], bool &alertTriggered, string periodName, 
+                    const double &open[], const double &high[], const double &low[], const double &close[]) {
+    // Boundary condition check: ensure index is valid and VWAP value is valid
+    if (currentBar <= 0 || currentBar >= ArraySize(vwapBuffer) || vwapBuffer[currentBar] == EMPTY_VALUE) return;
+    
+    double vwapValue = vwapBuffer[currentBar];
+    
+    // Get four key prices
+    double prevClose = close[currentBar-1];  // Close price of the most recent closed candlestick
+    double currOpen = open[currentBar];      // Open price of the current unclosed candlestick
+    double currLow = low[currentBar];        // Low price of the current unclosed candlestick
+    double currHigh = high[currentBar];      // High price of the current unclosed candlestick
+    
+    // Check if two price ranges contain VWAP
+    bool range1ContainsVWAP = (prevClose <= vwapValue && currOpen >= vwapValue) || 
+                              (prevClose >= vwapValue && currOpen <= vwapValue);
+    
+    bool range2ContainsVWAP = (currLow <= vwapValue && currHigh >= vwapValue);
+    
+    // If any price range contains VWAP, trigger alert
+    if (!alertTriggered && (range1ContainsVWAP || range2ContainsVWAP)) {
+        Alert(periodName + "VWAP Crossover Alert: " + _Symbol + 
+              " Price range contains VWAP: " + DoubleToString(vwapValue, _Digits) +
+              " Previous close: " + DoubleToString(prevClose, _Digits) +
+              " Open price: " + DoubleToString(currOpen, _Digits) +
+              " Low price: " + DoubleToString(currLow, _Digits) +
+              " High price: " + DoubleToString(currHigh, _Digits));
+        alertTriggered = true;
+        dtLastAlertTime = TimeCurrent();
+    }
+}
 
 int OnInit() {
     IndicatorSetInteger(INDICATOR_DIGITS,   _Digits);
@@ -98,6 +160,7 @@ int OnInit() {
     SetIndexBuffer(0, VWAP_Buffer_Daily,    INDICATOR_DATA);
     SetIndexBuffer(1, VWAP_Buffer_Weekly,   INDICATOR_DATA);
     SetIndexBuffer(2, VWAP_Buffer_Monthly,  INDICATOR_DATA);
+    SetIndexBuffer(3, VWAP_Buffer_Yearly,   INDICATOR_DATA);
 
     if (Show_Daily_Value) {
         ObjectCreate(0, "VWAP_Daily", OBJ_LABEL, 0, 0, 0);
@@ -132,6 +195,31 @@ int OnInit() {
         ObjectSetInteger(0, "VWAP_Monthly", OBJPROP_FONTSIZE,   7);
         ObjectSetString (0, "VWAP_Monthly", OBJPROP_FONT,       "Verdana");
         ObjectSetString (0, "VWAP_Monthly", OBJPROP_TEXT,       " ");
+        nStringYDistance = nStringYDistance + 20;
+    }
+
+    if (Show_Yearly_Value) {
+        ObjectCreate(0, "VWAP_Yearly", OBJ_LABEL, 0, 0, 0);
+        ObjectSetInteger(0, "VWAP_Yearly", OBJPROP_CORNER, 3);
+        ObjectSetInteger(0, "VWAP_Yearly", OBJPROP_XDISTANCE, 180);
+        ObjectSetInteger(0, "VWAP_Yearly", OBJPROP_YDISTANCE, nStringYDistance);
+        ObjectSetInteger(0, "VWAP_Yearly", OBJPROP_COLOR, indicator_color4);
+        ObjectSetInteger(0, "VWAP_Yearly", OBJPROP_FONTSIZE, 7);
+        ObjectSetString (0, "VWAP_Yearly", OBJPROP_FONT, "Verdana");
+        ObjectSetString (0, "VWAP_Yearly", OBJPROP_TEXT, " ");
+        nStringYDistance = nStringYDistance + 20;
+    }
+
+    // Create countdown label (display above VWAP labels)
+    if (Show_Countdown) {
+        ObjectCreate(0, "KLine_Countdown", OBJ_LABEL, 0, 0, 0);
+        ObjectSetInteger(0, "KLine_Countdown", OBJPROP_CORNER, 3);
+        ObjectSetInteger(0, "KLine_Countdown", OBJPROP_XDISTANCE, 180);
+        ObjectSetInteger(0, "KLine_Countdown", OBJPROP_YDISTANCE, 20);  // Fixed at top position
+        ObjectSetInteger(0, "KLine_Countdown", OBJPROP_COLOR, clrBlack);  // Use black color
+        ObjectSetInteger(0, "KLine_Countdown", OBJPROP_FONTSIZE, 7);
+        ObjectSetString (0, "KLine_Countdown", OBJPROP_FONT, "Verdana");
+        ObjectSetString (0, "KLine_Countdown", OBJPROP_TEXT, "Candlestick Closing Countdown: ");
     }
 
     return(INIT_SUCCEEDED);
@@ -141,6 +229,8 @@ void OnDeinit(const int pReason) {
     if (Show_Daily_Value)   ObjectDelete(0, "VWAP_Daily");
     if (Show_Weekly_Value)  ObjectDelete(0, "VWAP_Weekly");
     if (Show_Monthly_Value) ObjectDelete(0, "VWAP_Monthly");
+    if (Show_Yearly_Value)  ObjectDelete(0, "VWAP_Yearly");
+    if (Show_Countdown)     ObjectDelete(0, "KLine_Countdown");
 }
 
 int OnCalculate(const int       rates_total,
@@ -167,11 +257,13 @@ int OnCalculate(const int       rates_total,
         if (Enable_Daily)   {nIdx = nIdxDaily;   nSumDailyTPV = 0;   nSumDailyVol = 0;}
         if (Enable_Weekly)  {nIdx = nIdxWeekly;  nSumWeeklyTPV = 0;  nSumWeeklyVol = 0;}
         if (Enable_Monthly) {nIdx = nIdxMonthly; nSumMonthlyTPV = 0; nSumMonthlyVol = 0;}
+        if (Enable_Yearly)  {nIdx = nIdxYearly;  nSumYearlyTPV = 0;  nSumYearlyVol = 0;}
 
         for(; nIdx < rates_total; nIdx++) {
             VWAP_Buffer_Daily[nIdx] = EMPTY_VALUE;
             VWAP_Buffer_Weekly[nIdx] = EMPTY_VALUE;
             VWAP_Buffer_Monthly[nIdx] = EMPTY_VALUE;
+            VWAP_Buffer_Yearly[nIdx] = EMPTY_VALUE;
 
             if(CreateDateTime(DAILY, time[nIdx]) != dtLastDay) {
                 nIdxDaily = nIdx;
@@ -187,6 +279,11 @@ int OnCalculate(const int       rates_total,
                 nIdxMonthly = nIdx;
                 nSumMonthlyTPV = 0;
                 nSumMonthlyVol = 0;
+            }
+            if(CreateDateTime(YEARLY, time[nIdx]) != dtLastYear) {
+                nIdxYearly = nIdx;
+                nSumYearlyTPV = 0;
+                nSumYearlyVol = 0;
             }
 
             nPriceArr[nIdx] = 0;
@@ -270,12 +367,86 @@ int OnCalculate(const int       rates_total,
                 }
             }
 
+            if (Enable_Yearly && (nIdx >= nIdxYearly)) {
+                nSumYearlyTPV += nTotalTPV[nIdx];
+                nSumYearlyVol += nTotalVol[nIdx];
+
+                if (nSumYearlyVol)
+                    VWAP_Buffer_Yearly[nIdx] = (nSumYearlyTPV/nSumYearlyVol);
+
+                if((sYearlyStr != "VWAP Yearly: " + (string)NormalizeDouble(VWAP_Buffer_Yearly[nIdx], _Digits)) && Show_Yearly_Value) {
+                    sYearlyStr = "VWAP Yearly: " + (string)NormalizeDouble(VWAP_Buffer_Yearly[nIdx], _Digits);
+                    ObjectSetString(0, "VWAP_Yearly", OBJPROP_TEXT, sYearlyStr);
+                }
+            }
+
             dtLastDay = CreateDateTime(DAILY, time[nIdx]);
             dtLastWeek = CreateDateTime(WEEKLY, time[nIdx]);
             dtLastMonth = CreateDateTime(MONTHLY, time[nIdx]);
+            dtLastYear = CreateDateTime(YEARLY, time[nIdx]);
         }
 
         bIsFirstRun = false;
+    }
+
+    // VWAP crossover alert detection
+    if (Enable_Alert && rates_total > 0) {
+        int currentBar = rates_total - 1;  // Current candlestick index
+        
+        // Detect VWAP alerts for each period
+        if (Alert_On_Daily && Enable_Daily) {
+            CheckVWAPAlert(currentBar, VWAP_Buffer_Daily, bAlertDaily, "Daily", open, high, low, close);
+        }
+        
+        if (Alert_On_Weekly && Enable_Weekly) {
+            CheckVWAPAlert(currentBar, VWAP_Buffer_Weekly, bAlertWeekly, "Weekly", open, high, low, close);
+        }
+        
+        if (Alert_On_Monthly && Enable_Monthly) {
+            CheckVWAPAlert(currentBar, VWAP_Buffer_Monthly, bAlertMonthly, "Monthly", open, high, low, close);
+        }
+        
+        if (Alert_On_Yearly && Enable_Yearly) {
+            CheckVWAPAlert(currentBar, VWAP_Buffer_Yearly, bAlertYearly, "Yearly", open, high, low, close);
+        }
+        
+        // Detect new candlestick start, reset alert status
+        if (prev_calculated > 0 && rates_total > prev_calculated) {
+            bAlertDaily = false;
+            bAlertWeekly = false;
+            bAlertMonthly = false;
+            bAlertYearly = false;
+        }
+    }
+
+// Calculate and display candlestick closing countdown
+if (Show_Countdown && rates_total > 0) {
+        // Get current time
+        datetime currentTime = TimeCurrent();
+        
+        // Get current candlestick start time
+        datetime currentBarStart = time[rates_total - 1];
+        
+        // Calculate current candlestick end time (next candlestick start time)
+        datetime nextBarStart = currentBarStart + PeriodSeconds(PERIOD_CURRENT);
+        
+        // Calculate remaining time (seconds)
+        int remainingSeconds = (int)(nextBarStart - currentTime);
+        
+        // Ensure remaining time is not negative
+        if (remainingSeconds < 0) remainingSeconds = 0;
+        
+        // Format countdown display
+        int minutes = remainingSeconds / 60;
+        int seconds = remainingSeconds % 60;
+        
+        string newCountdownStr = StringFormat("Candlestick Closing Countdown: %02d:%02d", minutes, seconds);
+        
+        // Only update display when countdown text changes
+        if (sCountdownStr != newCountdownStr) {
+            sCountdownStr = newCountdownStr;
+            ObjectSetString(0, "KLine_Countdown", OBJPROP_TEXT, sCountdownStr);
+        }
     }
 
     return(rates_total);
